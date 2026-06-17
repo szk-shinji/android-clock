@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -50,6 +51,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import android.net.Uri
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Context
 import android.media.RingtoneManager
 import android.content.res.Configuration
 import android.Manifest
@@ -75,11 +81,22 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import android.graphics.Paint
 
-// クライアントの初期化（※実際のアプリではキーを直接書かず、local.propertiesなどで管理してください）
+/**
+ * Gemini AI クライアントの初期化
+ * 
+ * 注意: 実際の製品開発では API キーをコードに直接記述せず、
+ * local.properties や環境変数から取得するようにしてください。
+ */
 val client = Client.builder()
     .apiKey("AIzaSyArILv04ellTmY4tjz-HNcsoZRMzkNJrIM")
     .build()
 
+/**
+ * アプリケーションのメインアクティビティ
+ * 
+ * 通知権限のリクエスト、AIによるコンテンツ生成、
+ * およびメインの Compose UI セットアップを担当します。
+ */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -126,6 +143,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * クロックアプリ全体のダッシュボード
+ * 
+ * 時刻更新、時報ロジック、祝日取得、および設定画面との遷移を管理します。
+ * 
+ * @param modifier レイアウト調整用の Modifier
+ */
 @Composable
 fun ClockDashboard(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -137,9 +161,41 @@ fun ClockDashboard(modifier: Modifier = Modifier) {
     var isChimeEnabled by remember { mutableStateOf(true) }
     var chimeStartHour by remember { mutableStateOf(7) }
     var chimeEndHour by remember { mutableStateOf(18) }
+    var selectedRingtoneUri by remember { mutableStateOf<String?>(null) }
 
     // 画面遷移用の状態
     var showSettings by remember { mutableStateOf(false) }
+
+    val prefs = remember { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
+
+    // Ringtone pickerランチャー
+    val ringtoneLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val data = result.data
+            val pickedUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, android.net.Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            }
+            
+            if (pickedUri != null) {
+                selectedRingtoneUri = pickedUri.toString()
+                prefs.edit().putString("ringtone_uri", selectedRingtoneUri).apply()
+            } else {
+                selectedRingtoneUri = null
+                prefs.edit().remove("ringtone_uri").apply()
+            }
+        }
+    }
+
+    // 保存された設定を読み込む
+    LaunchedEffect(Unit) {
+        isChimeEnabled = prefs.getBoolean("chime_enabled", true)
+        chimeStartHour = prefs.getInt("chime_start_hour", 7)
+        chimeEndHour = prefs.getInt("chime_end_hour", 18)
+        selectedRingtoneUri = prefs.getString("ringtone_uri", null)
+    }
 
     LaunchedEffect(Unit) {
         // 時刻更新ループ
@@ -156,9 +212,15 @@ fun ClockDashboard(modifier: Modifier = Modifier) {
         if (isChimeEnabled && minute == 0 && hour in chimeStartHour..chimeEndHour && hour != lastChimeHour) {
             lastChimeHour = hour
             try {
-                var uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                var uri: android.net.Uri? = null
+                selectedRingtoneUri?.let {
+                    uri = android.net.Uri.parse(it)
+                }
                 if (uri == null) {
-                    uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    if (uri == null) {
+                        uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    }
                 }
                 
                 val r = RingtoneManager.getRingtone(context, uri)
@@ -197,11 +259,31 @@ fun ClockDashboard(modifier: Modifier = Modifier) {
         if (showSettings) {
             SettingsScreen(
                 isEnabled = isChimeEnabled,
-                onEnabledChange = { isChimeEnabled = it },
+                onEnabledChange = { 
+                    isChimeEnabled = it
+                    prefs.edit().putBoolean("chime_enabled", it).apply()
+                },
                 startHour = chimeStartHour,
-                onStartHourChange = { chimeStartHour = it },
+                onStartHourChange = { 
+                    chimeStartHour = it 
+                    prefs.edit().putInt("chime_start_hour", it).apply()
+                },
                 endHour = chimeEndHour,
-                onEndHourChange = { chimeEndHour = it },
+                onEndHourChange = { 
+                    chimeEndHour = it 
+                    prefs.edit().putInt("chime_end_hour", it).apply()
+                },
+                ringtoneUri = selectedRingtoneUri,
+                onPickRingtone = {
+                    val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                        putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "ベル音を選択")
+                        putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+                        putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                        val existing = selectedRingtoneUri?.let { android.net.Uri.parse(it) }
+                        putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, existing)
+                    }
+                    ringtoneLauncher.launch(intent)
+                },
                 onBack = { showSettings = false }
             )
         } else {
@@ -228,6 +310,14 @@ fun ClockDashboard(modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * メインの時計表示レイアウト
+ * 
+ * 画面の向き（縦・横）に応じて、アナログ時計とデジタル表示の配置を切り替えます。
+ * 
+ * @param dateTime 表示する現在時刻
+ * @param holidays 祝日のセット
+ */
 @Composable
 fun ClockMainLayout(
     dateTime: LocalDateTime,
@@ -348,6 +438,22 @@ fun ClockMainLayout(
     }
 }
 
+/**
+ * 設定画面
+ * 
+ * 時報の有効/無効、開始・終了時間、ベル音の選択など、
+ * アプリの動作オプションを設定する UI を提供します。
+ * 
+ * @param isEnabled 時報が有効かどうか
+ * @param onEnabledChange 有効状態変更時のコールバック
+ * @param startHour 時報を開始する時間 (0-23)
+ * @param onStartHourChange 開始時間変更時のコールバック
+ * @param endHour 時報を終了する時間 (0-23)
+ * @param onEndHourChange 終了時間変更時のコールバック
+ * @param ringtoneUri 現在選択されているベル音の URI 文字列
+ * @param onPickRingtone 音色選択を開始するコールバック
+ * @param onBack メイン画面へ戻るコールバック
+ */
 @Composable
 fun SettingsScreen(
     isEnabled: Boolean,
@@ -356,6 +462,8 @@ fun SettingsScreen(
     onStartHourChange: (Int) -> Unit,
     endHour: Int,
     onEndHourChange: (Int) -> Unit,
+    ringtoneUri: String?,
+    onPickRingtone: () -> Unit,
     onBack: () -> Unit
 ) {
     Column(
@@ -409,10 +517,48 @@ fun SettingsScreen(
                 valueRange = 0f..23f,
                 steps = 22
             )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            val context = LocalContext.current
+            val ringtoneTitle = remember(ringtoneUri) {
+                if (ringtoneUri != null) {
+                    val uri = Uri.parse(ringtoneUri)
+                    RingtoneManager.getRingtone(context, uri)?.getTitle(context) ?: "カスタム音"
+                } else {
+                    "デフォルト"
+                }
+            }
+
+            Text("ベル音の設定", color = Color.White, style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(ringtoneTitle, color = Color.White, modifier = Modifier.weight(1f))
+                OutlinedButton(onClick = onPickRingtone) {
+                    Text("音を選択", color = Color.White)
+                }
+            }
         }
     }
 }
 
+/**
+ * アナログ時計の文字盤を描画する Composable
+ * 
+ * 以下の要素を描画します：
+ * - 24時間計の外枠と目盛り（12時が上）
+ * - 0-23時の数字ラベル
+ * - 分針および時針
+ * - 秒針に連動して動く「XEyes（目）」の演出
+ * - 外周を回る秒針（三角形）
+ * 
+ * @param dateTime 描画する時刻
+ * @param modifier サイズやパディングを指定する Modifier
+ */
 @Composable
 fun ClockFace(dateTime: LocalDateTime, modifier: Modifier = Modifier) {
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
